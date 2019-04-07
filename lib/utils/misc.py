@@ -1,5 +1,6 @@
 import os
 import socket
+import glob
 from collections import defaultdict, Iterable
 from copy import deepcopy
 from datetime import datetime
@@ -10,8 +11,10 @@ import torch
 from core.config import cfg
 
 
-def get_run_name():
+def get_run_name(args):
     """ A unique name for each run """
+    if len(args.id) > 0:
+        return args.id
     return datetime.now().strftime(
         '%b%d-%H-%M-%S') + '_' + socket.gethostname()
 
@@ -21,6 +24,19 @@ def get_output_dir(args, run_name):
     cfg_filename, _ = os.path.splitext(os.path.split(args.cfg_file)[1])
     return os.path.join(cfg.OUTPUT_DIR, cfg_filename, run_name)
 
+
+def infer_load_ckpt(args):
+    """ Get the latest checkpoint from output_dir """
+    args.run_name = get_run_name(args) + '_step'
+    output_dir = get_output_dir(args, args.run_name)
+    # Get all snapshot files
+    sfiles = os.path.join(output_dir, 'ckpt', '*.pth')
+    sfiles = glob.glob(sfiles)
+    sfiles.sort(key=os.path.getmtime)
+    if len(sfiles) > 0:
+        args.load_ckpt = sfiles[-1]
+        if hasattr(args, 'resume'):
+            args.resume = True
 
 IMG_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.ppm', '.bmp', '.pgm']
 

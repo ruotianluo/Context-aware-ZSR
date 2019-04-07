@@ -28,6 +28,7 @@ import numpy as np
 import os
 import pycocotools.mask as mask_util
 
+from core.config import cfg
 from utils.colormap import colormap
 import utils.keypoints as keypoint_utils
 
@@ -101,6 +102,10 @@ def vis_bbox_opencv(img, bbox, thick=1):
 def get_class_string(class_index, score, dataset):
     class_text = dataset.classes[class_index] if dataset is not None else \
         'id{:d}'.format(class_index)
+    class_text = class_text.split('.')[0]
+    if cfg.TEST.CLASS_SPLIT:
+        if class_index in cfg.TEST.CLASS_SPLIT['target']: # Add @ for target classes
+            class_text =  class_text+' @'
     return class_text + ' {:0.2f}'.format(score).lstrip('0')
 
 
@@ -109,8 +114,9 @@ def vis_one_image(
         kp_thresh=2, dpi=200, box_alpha=0.0, dataset=None, show_class=False,
         ext='pdf'):
     """Visual debugging of detections."""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    if output_dir is not None:
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
 
     if isinstance(boxes, list):
         boxes, segms, keypoints, classes = convert_from_cls_format(
@@ -130,40 +136,65 @@ def vis_one_image(
     colors = [cmap(i) for i in np.linspace(0, 1, len(kp_lines) + 2)]
 
     fig = plt.figure(frameon=False)
-    fig.set_size_inches(im.shape[1] / dpi, im.shape[0] / dpi)
+    if output_dir is not None:
+        fig.set_size_inches(im.shape[1] / dpi, im.shape[0] / dpi)
     ax = plt.Axes(fig, [0., 0., 1., 1.])
     ax.axis('off')
     fig.add_axes(ax)
     ax.imshow(im)
 
+    # preprocess the boxes
+    if thresh < 0:
+        # When VIS_TH less than zero, it means take the highest -thresh score boxes 
+        sorted_inds = np.argsort(-boxes[:, -1])
+        boxes = boxes[sorted_inds[:-int(thresh)]]
+        classes = [classes[_] for _ in sorted_inds[:-int(thresh)]]
+
     # Display in largest to smallest order to reduce occlusion
     areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
     sorted_inds = np.argsort(-areas)
 
-    mask_color_id = 0
+    _boxes = []
+    texts = []
     for i in sorted_inds:
         bbox = boxes[i, :4]
         score = boxes[i, -1]
         if score < thresh:
             continue
+        if len(_boxes) > 0 and (bbox == _boxes[-1][:4]).all():
+            # Same box, merge prediction
+            texts[-1] += '/'+get_class_string(classes[i], score, dataset)
+        else:
+            _boxes.append(boxes[i])
+            texts.append(get_class_string(classes[i], score, dataset))
+    boxes = np.stack(_boxes)
 
-        print(dataset.classes[classes[i]], score)
+    mask_color_id = 0
+
+    for i in range(len(boxes)):
+        bbox = boxes[i, :4]
+        score = boxes[i, -1]
+        if score < thresh:
+            continue
+
+        # print(dataset.classes[classes[i]], score)
+        print(texts[i])
         # show box (off by default, box_alpha=0.0)
         ax.add_patch(
             plt.Rectangle((bbox[0], bbox[1]),
                           bbox[2] - bbox[0],
                           bbox[3] - bbox[1],
-                          fill=False, edgecolor='g',
-                          linewidth=0.5, alpha=box_alpha))
+                          fill=False, edgecolor='r', #'##66FF66' if '@'in texts[i] else '#0099FF' ,
+                          linewidth=5, alpha=box_alpha))
 
         if show_class:
             ax.text(
-                bbox[0], bbox[1] - 2,
-                get_class_string(classes[i], score, dataset),
+                bbox[0], bbox[1] + 6,
+                texts[i].split(' ')[0],#get_class_string(classes[i], score, dataset),
                 fontsize=3,
                 family='serif',
                 bbox=dict(
-                    facecolor='g', alpha=0.4, pad=0, edgecolor='none'),
+                    facecolor='#66FF66' if '@'in texts[i] else '#0099FF', alpha=0.4, pad=0, edgecolor='none'),
                 color='white')
 
         # show mask
@@ -239,6 +270,9 @@ def vis_one_image(
                     line, color=colors[len(kp_lines) + 1], linewidth=1.0,
                     alpha=0.7)
 
-        output_name = os.path.basename(im_name) + '.' + ext
-        fig.savefig(os.path.join(output_dir, '{}'.format(output_name)), dpi=dpi)
-        plt.close('all')
+        if output_dir is not None:
+            output_name = os.path.basename(im_name) + '.' + ext
+            fig.savefig(os.path.join(output_dir, '{}'.format(output_name)), dpi=dpi)
+            plt.close('all')
+        else:
+            plt.plot()

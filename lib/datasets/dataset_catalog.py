@@ -37,7 +37,21 @@ DEVKIT_DIR = 'devkit_directory'
 RAW_DIR = 'raw_dir'
 
 # Available datasets
-DATASETS = {
+from utils.collections import keydefaultdict
+def factory(k):
+    if k.startswith('vg'):
+        ds_name = k[:k.find('_')]
+        return {
+            IM_DIR:
+                _DATA_DIR + '/vg/images/',
+            ANN_FN:
+                 _DATA_DIR + '/%s/instances_%s.json' %(ds_name, k)
+        }
+    else:
+        return None
+
+DATASETS = keydefaultdict(factory)
+DATASETS.update({
     'cityscapes_fine_instanceonly_seg_train': {
         IM_DIR:
             _DATA_DIR + '/cityscapes/images',
@@ -201,6 +215,22 @@ DATASETS = {
         DEVKIT_DIR:
             _DATA_DIR + '/VOC2007/VOCdevkit2007'
     },
+    'voc_2007_train': {
+        IM_DIR:
+            _DATA_DIR + '/VOC2007/JPEGImages',
+        ANN_FN:
+            _DATA_DIR + '/VOC2007/annotations/voc_2007_train.json',
+        DEVKIT_DIR:
+            _DATA_DIR + '/VOC2007/VOCdevkit2007'
+    },
+    'voc_2007_val': {
+        IM_DIR:
+            _DATA_DIR + '/VOC2007/JPEGImages',
+        ANN_FN:
+            _DATA_DIR + '/VOC2007/annotations/voc_2007_val.json',
+        DEVKIT_DIR:
+            _DATA_DIR + '/VOC2007/VOCdevkit2007'
+    },
     'voc_2007_test': {
         IM_DIR:
             _DATA_DIR + '/VOC2007/JPEGImages',
@@ -216,5 +246,23 @@ DATASETS = {
             _DATA_DIR + '/VOC2012/annotations/voc_2012_trainval.json',
         DEVKIT_DIR:
             _DATA_DIR + '/VOC2012/VOCdevkit2012'
+    },
+    'voc_2012_train': {
+        IM_DIR:
+            _DATA_DIR + '/VOC2012/JPEGImages',
+        ANN_FN:
+            _DATA_DIR + '/VOC2012/annotations/voc_2012_train.json',
+        DEVKIT_DIR:
+            _DATA_DIR + '/VOC2012/VOCdevkit2012'
+    },
+    'voc_2012_val': {
+        IM_DIR:
+            _DATA_DIR + '/VOC2012/JPEGImages',
+        ANN_FN:
+            _DATA_DIR + '/VOC2012/annotations/voc_2012_val.json',
+        DEVKIT_DIR:
+            _DATA_DIR + '/VOC2012/VOCdevkit2012'
     }
-}
+})
+
+

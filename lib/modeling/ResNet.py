@@ -8,7 +8,6 @@ import torch.nn.functional as F
 from core.config import cfg
 import nn as mynn
 import utils.net as net_utils
-from utils.resnet_weights_helper import convert_state_dict
 
 # ---------------------------------------------------------------------------- #
 # Bits for specific architectures (ResNet50, ResNet101, ...)

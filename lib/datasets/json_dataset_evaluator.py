@@ -134,7 +134,7 @@ def evaluate_boxes(
     res_file += '.json'
     _write_coco_bbox_results_file(json_dataset, all_boxes, res_file)
     # Only do evaluation on non-test sets (annotations are undisclosed on test)
-    if json_dataset.name.find('test') == -1:
+    if json_dataset.name.find('test') == -1 or json_dataset.name.startswith('vg'):
         coco_eval = _do_detection_eval(json_dataset, res_file, output_dir)
     else:
         coco_eval = None
@@ -150,6 +150,8 @@ def _write_coco_bbox_results_file(json_dataset, all_boxes, res_file):
     #   "bbox": [258.15,41.29,348.26,243.78],
     #   "score": 0.236}, ...]
     results = []
+    # json_dataset.test_img_ids = sorted(json_dataset.COCO.getImgIds())
+    # json_dataset.test_img_ids = [_ for _, __ in enumerate(all_boxes[1]) if __ is not None] # If the result is None, it means this image is not asked to evaluate
     for cls_ind, cls in enumerate(json_dataset.classes):
         if cls == '__background__':
             continue
@@ -166,12 +168,13 @@ def _write_coco_bbox_results_file(json_dataset, all_boxes, res_file):
 
 def _coco_bbox_results_one_category(json_dataset, boxes, cat_id):
     results = []
-    image_ids = json_dataset.COCO.getImgIds()
-    image_ids.sort()
+    # image_ids = json_dataset.COCO.getImgIds()
+    # image_ids.sort()
+    image_ids = json_dataset.test_img_ids
     assert len(boxes) == len(image_ids)
     for i, image_id in enumerate(image_ids):
         dets = boxes[i]
-        if isinstance(dets, list) and len(dets) == 0:
+        if (isinstance(dets, list) and len(dets) == 0) or dets is None:
             continue
         dets = dets.astype(np.float)
         scores = dets[:, -1]
@@ -191,6 +194,8 @@ def _coco_bbox_results_one_category(json_dataset, boxes, cat_id):
 def _do_detection_eval(json_dataset, res_file, output_dir):
     coco_dt = json_dataset.COCO.loadRes(str(res_file))
     coco_eval = COCOeval(json_dataset.COCO, coco_dt, 'bbox')
+    coco_eval.params.imgIds = json_dataset.test_img_ids
+    coco_eval.params.iouThrs = np.linspace(.4, .6, 3, endpoint=True)
     coco_eval.evaluate()
     coco_eval.accumulate()
     _log_detection_eval_metrics(json_dataset, coco_eval)
@@ -208,8 +213,8 @@ def _log_detection_eval_metrics(json_dataset, coco_eval):
         assert np.isclose(iou_thr, thr)
         return ind
 
-    IoU_lo_thresh = 0.5
-    IoU_hi_thresh = 0.95
+    IoU_lo_thresh = 0.4
+    IoU_hi_thresh = 0.6
     ind_lo = _get_thr_ind(coco_eval, IoU_lo_thresh)
     ind_hi = _get_thr_ind(coco_eval, IoU_hi_thresh)
     # precision has dims (iou, recall, cls, area range, max dets)
@@ -221,6 +226,7 @@ def _log_detection_eval_metrics(json_dataset, coco_eval):
         '~~~~ Mean and per-category AP @ IoU=[{:.2f},{:.2f}] ~~~~'.format(
             IoU_lo_thresh, IoU_hi_thresh))
     logger.info('{:.1f}'.format(100 * ap_default))
+
     for cls_ind, cls in enumerate(json_dataset.classes):
         if cls == '__background__':
             continue
@@ -230,8 +236,31 @@ def _log_detection_eval_metrics(json_dataset, coco_eval):
         ap = np.mean(precision[precision > -1])
         logger.info('{:.1f}'.format(100 * ap))
     logger.info('~~~~ Summary metrics ~~~~')
+    tmp = coco_eval.eval['recall'][0,:,0,-1]
+    print('Recall@100, IoU@0.4', tmp[tmp>-1].mean())
+    tmp = coco_eval.eval['recall'][1,:,0,-1]
+    print('Recall@100, IoU@0.5', tmp[tmp>-1].mean())
+    tmp = coco_eval.eval['recall'][2,:,0,-1]
+    print('Recall@100, IoU@0.6', tmp[tmp>-1].mean())
     coco_eval.summarize()
 
+    if cfg.TEST.CLASS_SPLIT:
+        _precision = coco_eval.eval['precision']
+        _recall = coco_eval.eval['recall']
+        for split, classes in cfg.TEST.CLASS_SPLIT.items():
+            logger.info('~~~~ Summary for %s ~~~~' %split)
+            # We will inplace change the coco_eval to get source/target specific result
+            coco_eval.eval['precision'] = _precision[:, :, np.array(classes) - 1]
+            coco_eval.eval['recall'] = _recall[:, np.array(classes) - 1]
+            tmp = coco_eval.eval['recall'][0,:,0,-1]
+            print('Recall@100, IoU@0.4', tmp[tmp>-1].mean())
+            tmp = coco_eval.eval['recall'][1,:,0,-1]
+            print('Recall@100, IoU@0.5', tmp[tmp>-1].mean())
+            tmp = coco_eval.eval['recall'][2,:,0,-1]
+            print('Recall@100, IoU@0.6', tmp[tmp>-1].mean())
+            coco_eval.summarize()
+        coco_eval.eval['precision'] = _precision
+        coco_eval.eval['recall'] = _recall
 
 def evaluate_box_proposals(
     json_dataset, roidb, thresholds=None, area='all', limit=None

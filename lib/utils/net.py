@@ -73,10 +73,13 @@ def update_learning_rate(optimizer, cur_lr, new_lr):
         # Update learning rate, note that different parameter may have different learning rate
         param_keys = []
         for ind, param_group in enumerate(optimizer.param_groups):
-            if ind == 1 and cfg.SOLVER.BIAS_DOUBLE_LR:  # bias params
-                param_group['lr'] = new_lr * 2
-            else:
-                param_group['lr'] = new_lr
+            param_group['lr'] = eval(param_group.get('lr_scale', 'lambda x: x'))(new_lr)
+            # if ind == 1 and cfg.SOLVER.BIAS_DOUBLE_LR:  # bias params
+            #     assert param_group['lr'] == new_lr * 2
+            #     param_group['lr'] = new_lr * 2
+            # else:
+            #     assert param_group['lr'] == new_lr
+            #     param_group['lr'] = new_lr
             param_keys += param_group['params']
         if cfg.SOLVER.TYPE in ['SGD'] and cfg.SOLVER.SCALE_MOMENTUM and cur_lr > 1e-7 and \
                 ratio > cfg.SOLVER.SCALE_MOMENTUM_THRESHOLD:
@@ -96,7 +99,8 @@ def _CorrectMomentum(optimizer, param_keys, correction):
     """
     logger.info('Scaling update history by %.6f (new lr / old lr)', correction)
     for p_key in param_keys:
-        optimizer.state[p_key]['momentum_buffer'] *= correction
+        if 'momentum_buffer' in optimizer.state[p_key]:
+            optimizer.state[p_key]['momentum_buffer'] *= correction
 
 
 def _get_lr_change_ratio(cur_lr, new_lr):
@@ -155,12 +159,22 @@ def save_ckpt(output_dir, args, model, optimizer):
 
 def load_ckpt(model, ckpt):
     """Load checkpoint"""
-    mapping, _ = model.detectron_weight_mapping
-    state_dict = {}
-    for name in ckpt:
-        if mapping[name]:
-            state_dict[name] = ckpt[name]
-    model.load_state_dict(state_dict, strict=False)
+    # mapping, _ = model.detectron_weight_mapping
+    # state_dict = {}
+    # for name in ckpt:
+    #     if mapping[name]:
+    #         state_dict[name] = ckpt[name]
+    # model.load_state_dict(state_dict, strict=False)
+    state_dict = model.state_dict()
+    for p in set(state_dict.keys()).intersection(set(ckpt.keys())):
+        if state_dict[p].shape != ckpt[p].shape:
+            print(p, 'shape not matched')
+            del ckpt[p]
+    if set(model.state_dict().keys()) - set(ckpt.keys()):
+        print('Warning!!!!!!!!!!!! Missing keys in checkpoint:', ', '.join(list(set(model.state_dict().keys()) - set(ckpt.keys()))))
+    if set(ckpt.keys()) - set(model.state_dict().keys()):
+        print('Warning!!!!!!!!!!!! Unexpected keys in checkpoint:', ', '.join(list(set(ckpt.keys()) - set(model.state_dict().keys()))))
+    model.load_state_dict(ckpt, strict=False)
 
 
 def get_group_gn(dim):

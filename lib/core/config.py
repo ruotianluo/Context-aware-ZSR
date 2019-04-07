@@ -33,6 +33,9 @@ cfg = __C
 # ---------------------------------------------------------------------------- #
 __C.TRAIN = AttrDict()
 
+# Initialize network with weights from this file
+__C.TRAIN.IMAGENET_PRETRAINED_WEIGHTS = ''
+
 # Datasets to train on
 # Available dataset list: datasets.dataset_catalog.DATASETS.keys()
 # If multiple datasets are listed, the model is trained on their union
@@ -83,7 +86,7 @@ __C.TRAIN.BBOX_THRESH = 0.5
 __C.TRAIN.PROPOSAL_FILES = ()
 
 # Snapshot (model checkpoint) period
-# Divide by NUM_GPUS to determine actual period (e.g., 20000/8 => 2500 iters)
+# Divide by batch size to determine actual period (e.g., 20000/8 => 2500 iters)
 # to allow for linear training schedule scaling
 __C.TRAIN.SNAPSHOT_ITERS = 20000
 
@@ -107,6 +110,12 @@ __C.TRAIN.ASPECT_GROUPING = True
 __C.TRAIN.ASPECT_CROPPING = False
 __C.TRAIN.ASPECT_HI = 2
 __C.TRAIN.ASPECT_LO = 0.5
+
+# Fix according 
+__C.TRAIN.FIX_BACKBONE = False
+
+# Used for finetune from gcn trained classifier.
+__C.TRAIN.FIX_CLASSIFIER = False
 
 # ---------------------------------------------------------------------------- #
 # RPN training options
@@ -159,6 +168,9 @@ __C.TRAIN.GT_MIN_AREA = -1
 # Freeze the backbone architecture during training if set to True
 __C.TRAIN.FREEZE_CONV_BODY = False
 
+#### hohohoh, Add gt relation option when trainign relationship head.
+__C.TRAIN.USE_GT_REL = False
+__C.TRAIN.REL_BALANCE = False
 
 # ---------------------------------------------------------------------------- #
 # Data loader options
@@ -224,7 +236,7 @@ __C.TEST.DETECTIONS_PER_IM = 100
 # Minimum score threshold (assuming scores in a [0, 1] range); a value chosen to
 # balance obtaining high recall with not having too many low precision
 # detections that will slow down inference post processing steps (like NMS)
-__C.TEST.SCORE_THRESH = 0.05
+__C.TEST.SCORE_THRESH = 0.
 
 # Save detection results files if True
 # If false, results files are cleaned up (they can be large) after local
@@ -240,6 +252,36 @@ __C.TEST.FORCE_JSON_DATASET_EVAL = False
 # Indicates if precomputed proposals are used at test time
 # Not set for 1-stage models and 2-stage models with RPN subnetwork enabled
 __C.TEST.PRECOMPUTED_PROPOSALS = True
+
+# Indicates if we want to use ground truth bounding boxes
+__C.TEST.USE_GT_PROPOSALS = False
+
+# Indicates if we want to report precision
+__C.TEST.TAGGING = False
+
+# Use relationship estimation to augment classification
+__C.TEST.USE_REL_INFER = False
+__C.TEST.REL_INFER_ROUND = 100
+__C.TEST.REL_INFER_BINARY_WEIGHT = 1.
+__C.TEST.REL_INFER_PROPOSAL = 5
+
+__C.TEST.USE_GT_REL = False
+
+__C.TEST.EVALUATE_REL_ACC = False
+
+
+__C.REL_INFER = AttrDict()
+__C.REL_INFER.TRAIN = False
+__C.REL_INFER.TRAIN_WEIGHT = 1.
+
+__C.REL_INFER.CONSIDER_REVERSE_REL = False
+
+__C.REL_INFER.BINARY_NORMALIZE = False
+__C.REL_INFER.NO_REL_SCORE = False 
+__C.REL_INFER.NONE_BGREL_WEIGHT = 1. # binary potential weight
+
+__C.REL_INFER.MODE = 1
+__C.REL_INFER.PRETRAINED_WE = False
 
 
 # ---------------------------------------------------------------------------- #
@@ -386,6 +428,16 @@ __C.TEST.BBOX_VOTE.SCORING_METHOD = 'ID'
 __C.TEST.BBOX_VOTE.SCORING_METHOD_BETA = 1.0
 
 
+# Placeholder, later it will be assigned to be a dictrionary like {'source':[1,2,3], 'target':[4,5,6]}
+__C.TEST.CLASS_SPLIT = {}
+
+# Use conse for zero shot!
+__C.TEST.CONSE = False
+
+# Only keep the highest predicted label
+__C.TEST.KEEP_HIGHEST = False
+
+
 # ---------------------------------------------------------------------------- #
 # Model options
 # ---------------------------------------------------------------------------- #
@@ -406,6 +458,12 @@ __C.MODEL.NUM_CLASSES = -1
 # Use a class agnostic bounding box regressor instead of the default per-class
 # regressor
 __C.MODEL.CLS_AGNOSTIC_BBOX_REG = False
+
+# Use word embedding in the cls_score module of Box_Outs
+__C.MODEL.WORD_EMBEDDING_REGU = False
+
+# Ignore some class labels (Mostly for the source target split)
+__C.MODEL.IGNORE_CLASSES = ''
 
 # Default weights on (dx, dy, dw, dh) for normalizing bbox regression targets
 # These are empirically chosen to approximately lead to unit variance targets
@@ -449,6 +507,22 @@ __C.MODEL.SHARE_RES5 = False
 # If True, path to the weight file must be specified.
 # See: __C.RESNETS.IMAGENET_PRETRAINED_WEIGHTS
 __C.MODEL.LOAD_IMAGENET_PRETRAINED_WEIGHTS = True
+
+# Tagging mode. During tagging mode, there is no RPN and rpn loss.
+# The original RPN will just output ground truth proposals.
+# The background classes are not considered.
+__C.MODEL.TAGGING = False
+
+__C.MODEL.NUM_RELATIONS = -1
+__C.MODEL.RELATION_COOCCUR = False
+
+# What is the input of the relationship classifier
+# '' box feature
+# +GEO box feature + geometry feature
+# GEO only geometry feature
+__C.MODEL.RELATION_NET_INPUT = ''
+
+__C.MODEL.RELATION_NET_FEAT_STOP_GRAG = False
 
 # ---------------------------------------------------------------------------- #
 # Unsupervise Pose
@@ -641,6 +715,11 @@ __C.FAST_RCNN.ROI_XFORM_SAMPLING_RATIO = 0
 # pretrained FC layers like in VGG16, and will ignore this option
 __C.FAST_RCNN.ROI_XFORM_RESOLUTION = 14
 
+# Loss type for fast rcnn head
+__C.FAST_RCNN.LOSS_TYPE = 'cross_entropy' # max_margin, mutli_margin, triplet_softmax
+__C.FAST_RCNN.MARGIN = 1. # When loss is margin # Should we use 0.1?? 1 looks too high!
+__C.FAST_RCNN.SAE_REGU = False # When max-margin, if use semantic auto-encoder the regularize semantic embedding
+__C.FAST_RCNN.PROJ_LR_SCALE = 1. # Essentially change the learning rate.
 
 # ---------------------------------------------------------------------------- #
 # RPN options
@@ -905,6 +984,38 @@ __C.RESNETS.USE_GN = False
 
 
 # ---------------------------------------------------------------------------- #
+# MobileNet options ("MobileNet" = MBN1 and MBN2)
+# ---------------------------------------------------------------------------- #
+__C.MOBILENET = AttrDict()
+
+# Number of groups to use; 1 ==> ResNet; > 1 ==> ResNeXt
+__C.MOBILENET.NUM_GROUPS = 1
+
+# Baseline width of each group
+__C.MOBILENET.WIDTH_PER_GROUP = 64
+
+# Place the stride 2 conv on the 1x1 filter
+# Use True only for the original MSRA ResNet; use False for C2 and Torch models
+__C.MOBILENET.STRIDE_1X1 = True
+
+# Apply dilation in stage "res5"
+__C.MOBILENET.RES5_DILATION = 1
+
+# Freeze model weights before and including which block.
+# Choices: [0 - 12]. O means not fixed. First conv and bn are defaults to
+# be fixed.
+__C.MOBILENET.FREEZE_AT = 12
+
+# Path to pretrained resnet weights on ImageNet.
+# If start with '/', then it is treated as a absolute path.
+# Otherwise, treat as a relative path to __C.ROOT_DIR
+__C.MOBILENET.IMAGENET_PRETRAINED_WEIGHTS = ''
+
+# Use GroupNorm instead of BatchNorm
+__C.MOBILENET.USE_GN = False
+
+
+# ---------------------------------------------------------------------------- #
 # GroupNorm options
 # ---------------------------------------------------------------------------- #
 __C.GROUP_NORM = AttrDict()
@@ -1013,10 +1124,17 @@ def assert_and_infer_cfg(make_immutable=True):
     """
     if __C.MODEL.RPN_ONLY or __C.MODEL.FASTER_RCNN:
         __C.RPN.RPN_ON = True
-    if __C.RPN.RPN_ON or __C.RETINANET.RETINANET_ON:
+    if __C.MODEL.TAGGING and __C.TEST.TAGGING:
+        __C.TEST.USE_GT_PROPOSALS = True
+    if __C.TEST.USE_GT_PROPOSALS:
+        __C.MODEL.FASTER_RCNN = False # TODO: Currently this will not affect the training; It will potentially influence FPN if we do FPN
+        __C.TEST.BBOX_REG = False
+    if __C.MODEL.RELATION_COOCCUR:
+        __C.MODEL.NUM_RELATIONS = 2
+    if __C.RPN.RPN_ON or __C.RETINANET.RETINANET_ON or __C.TEST.USE_GT_PROPOSALS:
         __C.TEST.PRECOMPUTED_PROPOSALS = False
     if __C.MODEL.LOAD_IMAGENET_PRETRAINED_WEIGHTS:
-        assert __C.RESNETS.IMAGENET_PRETRAINED_WEIGHTS, \
+        assert __C.RESNETS.IMAGENET_PRETRAINED_WEIGHTS or __C.TRAIN.IMAGENET_PRETRAINED_WEIGHTS, \
             "Path to the weight file must not be empty to load imagenet pertrained resnets."
     if set([__C.MRCNN.ROI_MASK_HEAD, __C.KRCNN.ROI_KEYPOINTS_HEAD]) & _SHARE_RES5_HEADS:
         __C.MODEL.SHARE_RES5 = True
@@ -1157,6 +1275,10 @@ def _check_and_coerce_cfg_value_type(value_a, value_b, key, full_key):
         value_a = list(value_a)
     elif isinstance(value_a, list) and isinstance(value_b, tuple):
         value_a = tuple(value_a)
+    elif isinstance(value_a, int) and isinstance(value_b, float):
+        value_a = float(value_a)
+    elif isinstance(value_a, AttrDict) and isinstance(value_b, dict): # For TEST.CLASS_SPLIT
+        value_a = dict(value_a)
     else:
         raise ValueError(
             'Type mismatch ({} vs. {}) with values ({} vs. {}) for config '

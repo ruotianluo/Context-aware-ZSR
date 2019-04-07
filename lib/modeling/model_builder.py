@@ -1,6 +1,7 @@
 from functools import wraps
 import importlib
 import logging
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -8,16 +9,15 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 
 from core.config import cfg
-from model.roi_pooling.functions.roi_pool import RoIPoolFunction
-from model.roi_crop.functions.roi_crop import RoICropFunction
-from modeling.roi_xfrom.roi_align.functions.roi_align import RoIAlignFunction
+from model.roi_layers import ROIPool, ROIAlign
 import modeling.rpn_heads as rpn_heads
+import modeling.rel_heads as rel_heads
 import modeling.fast_rcnn_heads as fast_rcnn_heads
 import modeling.mask_rcnn_heads as mask_rcnn_heads
 import modeling.keypoint_rcnn_heads as keypoint_rcnn_heads
 import utils.blob as blob_utils
 import utils.net as net_utils
-import utils.resnet_weights_helper as resnet_utils
+import utils.pretrained_weights_helper as pretrained_utils
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +80,11 @@ class Generalized_RCNN(nn.Module):
         self.Conv_Body = get_func(cfg.MODEL.CONV_BODY)()
 
         # Region Proposal Network
-        if cfg.RPN.RPN_ON:
+        if cfg.RPN.RPN_ON and not cfg.MODEL.TAGGING:
             self.RPN = rpn_heads.generic_rpn_outputs(
+                self.Conv_Body.dim_out, self.Conv_Body.spatial_scale)
+        elif cfg.MODEL.TAGGING:
+            self.RPN = rpn_heads.single_scale_gt_outputs(
                 self.Conv_Body.dim_out, self.Conv_Body.spatial_scale)
 
         if cfg.FPN.FPN_ON:
@@ -105,6 +108,13 @@ class Generalized_RCNN(nn.Module):
             self.Box_Outs = fast_rcnn_heads.fast_rcnn_outputs(
                 self.Box_Head.dim_out)
 
+        if cfg.MODEL.NUM_RELATIONS > 0:
+            self.Rel_Outs = rel_heads.rel_outputs(self.Box_Head.dim_out)
+            if cfg.TEST.USE_REL_INFER:
+                self.Rel_Inf = rel_heads.rel_infer(self.Rel_Outs)
+            if cfg.REL_INFER.TRAIN:
+                self.Rel_Inf_Train = rel_heads.rel_infer_train(self.Rel_Outs)
+
         # Mask Branch
         if cfg.MODEL.MASK_ON:
             self.Mask_Head = get_func(cfg.MRCNN.ROI_MASK_HEAD)(
@@ -125,7 +135,14 @@ class Generalized_RCNN(nn.Module):
 
     def _init_modules(self):
         if cfg.MODEL.LOAD_IMAGENET_PRETRAINED_WEIGHTS:
-            resnet_utils.load_pretrained_imagenet_weights(self)
+            if 'MobileNet' in cfg.MODEL.CONV_BODY:
+                pretrained_utils.mobilenet_load_pretrained_imagenet_weights(self)
+            elif 'VGG16' in cfg.MODEL.CONV_BODY:
+                pretrained_utils.vgg16_load_pretrained_imagenet_weights(self)
+            elif 'VGGM' in cfg.MODEL.CONV_BODY:
+                pretrained_utils.vggm_load_pretrained_imagenet_weights(self)
+            else:
+                pretrained_utils.load_pretrained_imagenet_weights(self)
             # Check if shared weights are equaled
             if cfg.MODEL.MASK_ON and getattr(self.Mask_Head, 'SHARE_RES5', False):
                 assert compare_state_dict(self.Mask_Head.res5.state_dict(), self.Box_Head.res5.state_dict())
@@ -136,14 +153,14 @@ class Generalized_RCNN(nn.Module):
             for p in self.Conv_Body.parameters():
                 p.requires_grad = False
 
-    def forward(self, data, im_info, roidb=None, **rpn_kwargs):
+    def forward(self, data, im_info, roidb=None, rois=None, **rpn_kwargs):
         if cfg.PYTORCH_VERSION_LESS_THAN_040:
-            return self._forward(data, im_info, roidb, **rpn_kwargs)
+            return self._forward(data, im_info, roidb, rois, **rpn_kwargs)
         else:
             with torch.set_grad_enabled(self.training):
-                return self._forward(data, im_info, roidb, **rpn_kwargs)
+                return self._forward(data, im_info, roidb, rois, **rpn_kwargs)
 
-    def _forward(self, data, im_info, roidb=None, **rpn_kwargs):
+    def _forward(self, data, im_info, roidb=None, rois=None, **rpn_kwargs):
         im_data = data
         if self.training:
             roidb = list(map(lambda x: blob_utils.deserialize(x)[0], roidb))
@@ -152,9 +169,18 @@ class Generalized_RCNN(nn.Module):
 
         return_dict = {}  # A dict to collect return variables
 
-        blob_conv = self.Conv_Body(im_data)
+        if cfg.MODEL.RELATION_NET_INPUT == 'GEO' and not cfg.REL_INFER.TRAIN and cfg.MODEL.NUM_RELATIONS > 0 and self.training:
+            blob_conv = im_data
+        else:
+            blob_conv = self.Conv_Body(im_data)
 
         rpn_ret = self.RPN(blob_conv, im_info, roidb)
+        # If rpn_ret doesn't have rpn_ret, the rois should have been given, we use that.
+        if 'rois' not in rpn_ret:
+            rpn_ret['rois'] = rois
+        if hasattr(self, '_ignore_classes') and 'labels_int32' in rpn_ret:
+            # Turn ignore classes labels to 0, because they are treated as background
+            rpn_ret['labels_int32'][np.isin(rpn_ret['labels_int32'], self._ignore_classes)] = 0
 
         # if self.training:
         #     # can be used to infer fg/bg ratio
@@ -172,36 +198,82 @@ class Generalized_RCNN(nn.Module):
             if cfg.MODEL.SHARE_RES5 and self.training:
                 box_feat, res5_feat = self.Box_Head(blob_conv, rpn_ret)
             else:
-                box_feat = self.Box_Head(blob_conv, rpn_ret)
-            cls_score, bbox_pred = self.Box_Outs(box_feat)
-        else:
-            # TODO: complete the returns for RPN only situation
-            pass
+                if cfg.MODEL.RELATION_NET_INPUT == 'GEO' and not cfg.REL_INFER.TRAIN and cfg.MODEL.NUM_RELATIONS > 0 and self.training:
+                    box_feat = blob_conv.new_zeros(rpn_ret['labels_int32'].shape[0], self.Box_Head.dim_out)
+                else:
+                    box_feat = self.Box_Head(blob_conv, rpn_ret)
+            if cfg.MODEL.RELATION_NET_INPUT == 'GEO' and not cfg.REL_INFER.TRAIN and cfg.MODEL.NUM_RELATIONS > 0 and self.training:
+                cls_score = box_feat.new_zeros(rpn_ret['labels_int32'].shape[0], cfg.MODEL.NUM_CLASSES)
+                bbox_pred = box_feat.new_zeros(rpn_ret['labels_int32'].shape[0], 4*cfg.MODEL.NUM_CLASSES)
+            else:
+                cls_score, bbox_pred = self.Box_Outs(box_feat)
+            if cfg.TEST.TAGGING:
+                rois_label = torch.from_numpy(rpn_ret['labels_int32'].astype('int64')).to(cls_score.device)
+                accuracy_cls = cls_score.max(1)[1].eq(rois_label).float().mean(dim=0)
+                print('Before refine:', accuracy_cls.item())
+
+        if cfg.MODEL.NUM_RELATIONS > 0 and self.training:
+            rel_scores, rel_labels = self.Rel_Outs(rpn_ret['rois'], box_feat, rpn_ret['labels_int32'], roidb=roidb)
+        elif cfg.MODEL.NUM_RELATIONS > 0 and cfg.TEST.USE_REL_INFER:
+            if cfg.TEST.TAGGING:
+                rel_scores = self.Rel_Outs(rpn_ret['rois'], box_feat)
+                cls_score = self.Rel_Inf(cls_score, rel_scores, roidb=roidb)
+            else: # zero shot detection
+                filt = (cls_score.topk(cfg.TEST.REL_INFER_PROPOSAL, 1)[1] == 0).float().sum(1) == 0
+                filt[cls_score[:,1:].max(1)[0].topk(min(100, cls_score.shape[0]), 0)[1]] += 1
+                filt = filt >= 2
+                if filt.sum() == 0:
+                    print('all background?')
+                else:
+                    tmp_rois = rpn_ret['rois'][filt.cpu().numpy().astype('bool')]
+                    
+                    rel_scores = self.Rel_Outs(tmp_rois, box_feat[filt])
+                    tmp_cls_score = self.Rel_Inf(cls_score[filt], rel_scores, roidb=None)
+                    cls_score[filt] = tmp_cls_score
+            if cfg.TEST.TAGGING:
+                rois_label = torch.from_numpy(rpn_ret['labels_int32'].astype('int64')).to(cls_score.device)
+                accuracy_cls = cls_score.max(1)[1].eq(rois_label).float().mean(dim=0)
+                print('After refine:', accuracy_cls.item())
 
         if self.training:
             return_dict['losses'] = {}
             return_dict['metrics'] = {}
             # rpn loss
-            rpn_kwargs.update(dict(
-                (k, rpn_ret[k]) for k in rpn_ret.keys()
-                if (k.startswith('rpn_cls_logits') or k.startswith('rpn_bbox_pred'))
-            ))
-            loss_rpn_cls, loss_rpn_bbox = rpn_heads.generic_rpn_losses(**rpn_kwargs)
-            if cfg.FPN.FPN_ON:
-                for i, lvl in enumerate(range(cfg.FPN.RPN_MIN_LEVEL, cfg.FPN.RPN_MAX_LEVEL + 1)):
-                    return_dict['losses']['loss_rpn_cls_fpn%d' % lvl] = loss_rpn_cls[i]
-                    return_dict['losses']['loss_rpn_bbox_fpn%d' % lvl] = loss_rpn_bbox[i]
-            else:
-                return_dict['losses']['loss_rpn_cls'] = loss_rpn_cls
-                return_dict['losses']['loss_rpn_bbox'] = loss_rpn_bbox
+            if not cfg.MODEL.TAGGING:
+                rpn_kwargs.update(dict(
+                    (k, rpn_ret[k]) for k in rpn_ret.keys()
+                    if (k.startswith('rpn_cls_logits') or k.startswith('rpn_bbox_pred'))
+                ))
+                loss_rpn_cls, loss_rpn_bbox = rpn_heads.generic_rpn_losses(**rpn_kwargs)
+                if cfg.FPN.FPN_ON:
+                    for i, lvl in enumerate(range(cfg.FPN.RPN_MIN_LEVEL, cfg.FPN.RPN_MAX_LEVEL + 1)):
+                        return_dict['losses']['loss_rpn_cls_fpn%d' % lvl] = loss_rpn_cls[i]
+                        return_dict['losses']['loss_rpn_bbox_fpn%d' % lvl] = loss_rpn_bbox[i]
+                else:
+                    return_dict['losses']['loss_rpn_cls'] = loss_rpn_cls
+                    return_dict['losses']['loss_rpn_bbox'] = loss_rpn_bbox
 
-            # bbox loss
-            loss_cls, loss_bbox, accuracy_cls = fast_rcnn_heads.fast_rcnn_losses(
-                cls_score, bbox_pred, rpn_ret['labels_int32'], rpn_ret['bbox_targets'],
-                rpn_ret['bbox_inside_weights'], rpn_ret['bbox_outside_weights'])
-            return_dict['losses']['loss_cls'] = loss_cls
-            return_dict['losses']['loss_bbox'] = loss_bbox
-            return_dict['metrics']['accuracy_cls'] = accuracy_cls
+            if not cfg.MODEL.RPN_ONLY:
+                # bbox loss
+                loss_cls, loss_bbox, accuracy_cls = fast_rcnn_heads.fast_rcnn_losses(
+                    cls_score, bbox_pred, rpn_ret['labels_int32'], rpn_ret['bbox_targets'],
+                    rpn_ret['bbox_inside_weights'], rpn_ret['bbox_outside_weights'])
+                return_dict['losses']['loss_cls'] = loss_cls
+                return_dict['losses']['loss_bbox'] = loss_bbox
+                return_dict['metrics']['accuracy_cls'] = accuracy_cls
+
+                if hasattr(loss_cls, 'mean_similarity'):
+                    return_dict['metrics']['mean_similarity'] = loss_cls.mean_similarity
+
+                if cfg.FAST_RCNN.SAE_REGU:
+                    tmp = cls_score.sae_loss[(rpn_ret['labels_int32']>0).tolist()]
+                    return_dict['losses']['loss_sae'] = 1e-4 * tmp.mean() if tmp.numel() > 0 else tmp.new_tensor(0)
+                    if torch.isnan(return_dict['losses']['loss_sae']):
+                        import pdb;pdb.set_trace()
+
+            if cfg.REL_INFER.TRAIN:
+                return_dict['losses']['loss_rel_infer'] = cfg.REL_INFER.TRAIN_WEIGHT * \
+                    self.Rel_Inf_Train(rpn_ret['rois'], rpn_ret['labels_int32'], cls_score, rel_scores, roidb=roidb)
 
             if cfg.MODEL.MASK_ON:
                 if getattr(self.Mask_Head, 'SHARE_RES5', False):
@@ -243,9 +315,12 @@ class Generalized_RCNN(nn.Module):
 
         else:
             # Testing
-            return_dict['rois'] = rpn_ret['rois']
-            return_dict['cls_score'] = cls_score
-            return_dict['bbox_pred'] = bbox_pred
+            return_dict.update(rpn_ret)
+            if not cfg.MODEL.RPN_ONLY:
+                if cfg.TEST.KEEP_HIGHEST:
+                    cls_score = F.softmax(cls_score * 1e10, dim=1) * cls_score
+                return_dict['cls_score'] = cls_score
+                return_dict['bbox_pred'] = bbox_pred
 
         return return_dict
 
@@ -258,7 +333,7 @@ class Generalized_RCNN(nn.Module):
           - Use of FPN or not
           - Specifics of the transform method
         """
-        assert method in {'RoIPoolF', 'RoICrop', 'RoIAlign'}, \
+        assert method in {'RoIPoolF', 'RoIAlign'}, \
             'Unknown pooling method: {}'.format(method)
 
         if isinstance(blobs_in, list):
@@ -276,19 +351,10 @@ class Generalized_RCNN(nn.Module):
                     rois = Variable(torch.from_numpy(rpn_ret[bl_rois])).cuda(device_id)
                     if method == 'RoIPoolF':
                         # Warning!: Not check if implementation matches Detectron
-                        xform_out = RoIPoolFunction(resolution, resolution, sc)(bl_in, rois)
-                    elif method == 'RoICrop':
-                        # Warning!: Not check if implementation matches Detectron
-                        grid_xy = net_utils.affine_grid_gen(
-                            rois, bl_in.size()[2:], self.grid_size)
-                        grid_yx = torch.stack(
-                            [grid_xy.data[:, :, :, 1], grid_xy.data[:, :, :, 0]], 3).contiguous()
-                        xform_out = RoICropFunction()(bl_in, Variable(grid_yx).detach())
-                        if cfg.CROP_RESIZE_WITH_MAX_POOL:
-                            xform_out = F.max_pool2d(xform_out, 2, 2)
+                        xform_out = ROIPool((resolution, resolution), sc)(bl_in, rois)
                     elif method == 'RoIAlign':
-                        xform_out = RoIAlignFunction(
-                            resolution, resolution, sc, sampling_ratio)(bl_in, rois)
+                        xform_out = ROIAlign(
+                            (resolution, resolution), sc, sampling_ratio)(bl_in, rois)
                     bl_out_list.append(xform_out)
 
             # The pooled features from all levels are concatenated along the
@@ -309,17 +375,10 @@ class Generalized_RCNN(nn.Module):
             device_id = blobs_in.get_device()
             rois = Variable(torch.from_numpy(rpn_ret[blob_rois])).cuda(device_id)
             if method == 'RoIPoolF':
-                xform_out = RoIPoolFunction(resolution, resolution, spatial_scale)(blobs_in, rois)
-            elif method == 'RoICrop':
-                grid_xy = net_utils.affine_grid_gen(rois, blobs_in.size()[2:], self.grid_size)
-                grid_yx = torch.stack(
-                    [grid_xy.data[:, :, :, 1], grid_xy.data[:, :, :, 0]], 3).contiguous()
-                xform_out = RoICropFunction()(blobs_in, Variable(grid_yx).detach())
-                if cfg.CROP_RESIZE_WITH_MAX_POOL:
-                    xform_out = F.max_pool2d(xform_out, 2, 2)
+                xform_out = ROIPool((resolution, resolution), spatial_scale)(blobs_in, rois)
             elif method == 'RoIAlign':
-                xform_out = RoIAlignFunction(
-                    resolution, resolution, spatial_scale, sampling_ratio)(blobs_in, rois)
+                xform_out = ROIAlign(
+                    (resolution, resolution), spatial_scale, sampling_ratio)(blobs_in, rois)
 
         return xform_out
 

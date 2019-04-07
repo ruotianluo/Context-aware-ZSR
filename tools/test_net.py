@@ -13,6 +13,7 @@ import _init_paths  # pylint: disable=unused-import
 from core.config import cfg, merge_cfg_from_file, merge_cfg_from_list, assert_and_infer_cfg
 from core.test_engine import run_inference
 import utils.logging
+import utils.misc as misc_utils
 
 # OpenCL may be enabled by default in OpenCV3; disable it because it's not
 # thread safe and causes unwanted GPU memory allocations.
@@ -35,9 +36,18 @@ def parse_args():
         '--load_detectron', help='path to the detectron weight pickle file')
 
     parser.add_argument(
+        '--id', type=str, default="",
+        help='The id you want to use to save the model or autoresume')
+
+    parser.add_argument(
         '--output_dir',
         help='output directory to save the testing results. If not provided, '
              'defaults to [args.load_ckpt|args.load_detectron]/../test.')
+
+    parser.add_argument(
+        '--output_dir_append',
+        help='will be [args.load_ckpt|args.load_detectron]/../test/[output_dir_append].'
+             'This allows us to save different test setting in different directory.')
 
     parser.add_argument(
         '--set', dest='set_cfgs',
@@ -70,12 +80,17 @@ if __name__ == '__main__':
 
     assert (torch.cuda.device_count() == 1) ^ bool(args.multi_gpu_testing)
 
+    if args.id:
+        misc_utils.infer_load_ckpt(args)
+
     assert bool(args.load_ckpt) ^ bool(args.load_detectron), \
         'Exactly one of --load_ckpt and --load_detectron should be specified.'
     if args.output_dir is None:
         ckpt_path = args.load_ckpt if args.load_ckpt else args.load_detectron
         args.output_dir = os.path.join(
             os.path.dirname(os.path.dirname(ckpt_path)), 'test')
+        if args.output_dir_append is not None:
+            args.output_dir = os.path.join(args.output_dir, args.output_dir_append)
         logger.info('Automatically set output directory to %s', args.output_dir)
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
@@ -93,6 +108,14 @@ if __name__ == '__main__':
     elif args.dataset == "keypoints_coco2017":
         cfg.TEST.DATASETS = ('keypoints_coco_2017_val',)
         cfg.MODEL.NUM_CLASSES = 2
+    elif args.dataset == "pascal_voc":
+        cfg.TEST.DATASETS = ('voc_2007_test',)
+        cfg.MODEL.NUM_CLASSES = 21
+    elif args.dataset == "pascal_voc_0712":
+        cfg.TEST.DATASETS = ('voc_2007_test',)
+        cfg.MODEL.NUM_CLASSES = 21
+    elif args.dataset.startswith("vg"):
+        cfg.TEST.DATASETS = ('%s_test' %args.dataset,)
     else:  # For subprocess call
         assert cfg.TEST.DATASETS, 'cfg.TEST.DATASETS shouldn\'t be empty'
     assert_and_infer_cfg()

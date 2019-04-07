@@ -158,6 +158,16 @@ def _sample_rois(roidb, im_scale, batch_idx):
 
     # The indices that we're selecting (both fg and bg)
     keep_inds = np.append(fg_inds, bg_inds)
+
+    if cfg.TEST.TAGGING or (cfg.MODEL.TAGGING):
+        # Manually change keep_inds, so that the rois and label_int32 won't be shuffled.
+        keep_inds = np.arange(len(roidb['boxes']))
+        fg_rois_per_this_image = len(roidb['boxes'])
+        bg_rois_per_this_image = 0
+    
+    if cfg.MODEL.TAGGING:
+        assert bg_rois_per_this_image == 0
+
     # Label is the class each RoI has max overlap with
     sampled_labels = roidb['max_classes'][keep_inds]
     sampled_labels[fg_rois_per_this_image:] = 0  # Label bg RoIs with class 0

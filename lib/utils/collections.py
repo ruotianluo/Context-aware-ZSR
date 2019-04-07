@@ -20,6 +20,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+from collections import defaultdict
 
 class AttrDict(dict):
 
@@ -64,3 +65,12 @@ class AttrDict(dict):
 
     def is_immutable(self):
         return self.__dict__[AttrDict.IMMUTABLE]
+
+
+class keydefaultdict(defaultdict):
+    def __missing__(self, key):
+        if self.default_factory is None:
+            raise KeyError(key)
+        else:
+            ret = self[key] = self.default_factory(key)
+            return ret

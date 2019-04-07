@@ -17,9 +17,26 @@ import utils.blob as blob_utils
 class RoiDataLoader(data.Dataset):
     def __init__(self, roidb, num_classes, training=True):
         self._roidb = roidb
+        self._prepare_extra_info()
         self._num_classes = num_classes
         self.training = training
         self.DATA_SIZE = len(self._roidb)
+
+    def _prepare_extra_info(self):
+        self._extra_info = {k:self._roidb[0][k] for k in set(self._roidb[0].keys()) - set(self._roidb[1].keys())}
+        if 'relationships' in self._extra_info:
+            from collections import defaultdict
+            tmp = defaultdict(list)
+            for rel in self._extra_info['relationships']:
+                tmp[(rel['subject_id'], rel['object_id'])].append(rel['rel_id'])
+            if cfg.MODEL.RELATION_COOCCUR:
+                for k in tmp:
+                    tmp[k] = [1]
+            self._extra_info['relationships'] = tmp
+        if 'word_embeddings' in self._extra_info:
+            self._extra_info['word_embeddings'] = torch.tensor(self._extra_info['word_embeddings'])
+        if 'rel_embeddings' in self._extra_info:
+            self._extra_info['rel_embeddings'] = torch.tensor(self._extra_info['rel_embeddings'])
 
     def __getitem__(self, index_tuple):
         index, ratio = index_tuple
@@ -155,7 +172,21 @@ class MinibatchSampler(torch_sampler.Sampler):
             # for each minibatch on each GPU.
             self.ratio_list_minibatch = cal_minibatch_ratio(ratio_list)
 
+        self._reset_iter()
+
     def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.iter_counter == len(self._ratio_index):
+            self._reset_iter()
+            raise StopIteration()
+        else:
+            elem = (self._ratio_index[self.iter_counter], self._ratio_list_minibatch[self.iter_counter])
+            self.iter_counter += 1
+            return elem
+
+    def _reset_iter(self):
         if cfg.TRAIN.ASPECT_GROUPING:
             # indices for aspect grouping awared permutation
             n, rem = divmod(self.num_data, cfg.TRAIN.IMS_PER_BATCH)
@@ -164,19 +195,36 @@ class MinibatchSampler(torch_sampler.Sampler):
             npr.shuffle(indices.reshape(-1, cfg.TRAIN.IMS_PER_BATCH))  # inplace shuffle
             if rem != 0:
                 indices = np.append(indices, np.arange(round_num_data, round_num_data + rem))
-            ratio_index = self.ratio_index[indices]
-            ratio_list_minibatch = self.ratio_list_minibatch[indices]
+            self._ratio_index = self.ratio_index[indices]
+            self._ratio_list_minibatch = self.ratio_list_minibatch[indices]
         else:
             rand_perm = npr.permutation(self.num_data)
             ratio_list = self.ratio_list[rand_perm]
-            ratio_index = self.ratio_index[rand_perm]
+            self._ratio_index = self.ratio_index[rand_perm]
             # re-calculate minibatch ratio list
-            ratio_list_minibatch = cal_minibatch_ratio(ratio_list)
+            self._ratio_list_minibatch = cal_minibatch_ratio(ratio_list)
 
-        return iter(zip(ratio_index.tolist(), ratio_list_minibatch.tolist()))
+        self.iter_counter = 0
+        self._ratio_index = self._ratio_index.tolist()
+        self._ratio_list_minibatch = self._ratio_list_minibatch.tolist()
 
     def __len__(self):
         return self.num_data
+
+    def load_state_dict(self, state_dict=None):
+        if state_dict is None:
+            return
+        self._ratio_index = state_dict['ratio_index']
+        self._ratio_list_minibatch = state_dict['ratio_list_minibatch']
+        self.iter_counter = state_dict['iter_counter']
+
+    def state_dict(self, prefetched_num=None):
+        prefetched_num = prefetched_num or 0
+        return {
+            'ratio_index': self._ratio_index,
+            'ratio_list_minibatch': self._ratio_list_minibatch,
+            'iter_counter': self.iter_counter - prefetched_num
+        }
 
 
 class BatchSampler(torch_sampler.BatchSampler):

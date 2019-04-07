@@ -1,0 +1,1 @@
+python tools/train_net_step.py --dataset vgbansal --use_tfboard --nw 64 --bs 8 --cfg configs/mine/iter_reason_new.yaml --auto_resume --set MODEL.NUM_CLASSES 609 MODEL.WORD_EMBEDDING_REGU True MODEL.IGNORE_CLASSES target --id irn_vg_gt_we_sc

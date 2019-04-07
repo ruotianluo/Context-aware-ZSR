@@ -54,7 +54,7 @@ class JsonDataset(object):
     """A class representing a COCO json dataset."""
 
     def __init__(self, name):
-        assert name in DATASETS.keys(), \
+        assert DATASETS[name] is not None, \
             'Unknown dataset name: {}'.format(name)
         assert os.path.exists(DATASETS[name][IM_DIR]), \
             'Image directory \'{}\' not found'.format(DATASETS[name][IM_DIR])
@@ -188,6 +188,7 @@ class JsonDataset(object):
         entry['boxes'] = np.empty((0, 4), dtype=np.float32)
         entry['segms'] = []
         entry['gt_classes'] = np.empty((0), dtype=np.int32)
+        entry['gt_relationships'] = {}
         entry['seg_areas'] = np.empty((0), dtype=np.float32)
         entry['gt_overlaps'] = scipy.sparse.csr_matrix(
             np.empty((0, self.num_classes), dtype=np.float32)
@@ -293,6 +294,29 @@ class JsonDataset(object):
             )
             entry['has_visible_keypoints'] = im_has_visible_keypoints
 
+        if 'real_relationships' in self.COCO.dataset:
+            rels = self.COCO.dataset['real_relationships'][str(entry['id'])]
+            entry['object_ids'] = [obj['object_id'] for obj in valid_objs]
+            object_id_to_gt_ind = {oid:ix for ix,oid in enumerate(entry['object_ids'])}
+            entry['ori_relationships'] = rels
+            entry['gt_relationships'] = {}
+            for r in rels:
+                if not r['subject_id'] in object_id_to_gt_ind:
+                    print('Miss id %d'%r['subject_id'])
+                    continue
+                if not r['object_id'] in object_id_to_gt_ind:
+                    print('Miss id %d'%r['object_id'])
+                    continue
+                if r['object_id'] == r['subject_id']:
+                    print('Same subject object')
+                    continue
+                s_id = object_id_to_gt_ind[r['subject_id']]
+                o_id = object_id_to_gt_ind[r['object_id']]
+                entry['gt_relationships'][(s_id, o_id)] = entry['gt_relationships'].get((s_id, o_id), []) +\
+                    [r['rel_id']]
+                entry['gt_relationships'][(s_id, o_id)] = list(set(entry['gt_relationships'][(s_id, o_id)]))
+            
+
     def _add_gt_from_cache(self, roidb, cache_filepath):
         """Add ground truth annotation metadata from cached file."""
         logger.info('Loading cached gt_roidb from %s', cache_filepath)
@@ -305,6 +329,7 @@ class JsonDataset(object):
             values = [cached_entry[key] for key in self.valid_cached_keys]
             boxes, segms, gt_classes, seg_areas, gt_overlaps, is_crowd, \
                 box_to_gt_ind_map = values[:7]
+            gt_relationships = cached_entry.get('gt_relationships', {}) # To be compatible with coco or normal vg
             if self.keypoints is not None:
                 gt_keypoints, has_visible_keypoints = values[7:]
             entry['boxes'] = np.append(entry['boxes'], boxes, axis=0)
@@ -313,6 +338,7 @@ class JsonDataset(object):
             # entry['boxes'] = np.append(
             #     entry['boxes'], boxes.astype(np.int).astype(np.float), axis=0)
             entry['gt_classes'] = np.append(entry['gt_classes'], gt_classes)
+            entry['gt_relationships'].update(gt_relationships)
             entry['seg_areas'] = np.append(entry['seg_areas'], seg_areas)
             entry['gt_overlaps'] = scipy.sparse.csr_matrix(gt_overlaps)
             entry['is_crowd'] = np.append(entry['is_crowd'], is_crowd)
@@ -330,8 +356,8 @@ class JsonDataset(object):
     ):
         """Add proposals from a proposals file to an roidb."""
         logger.info('Loading proposals from: {}'.format(proposal_file))
-        with open(proposal_file, 'r') as f:
-            proposals = pickle.load(f)
+        with open(proposal_file, 'rb') as f:
+            proposals = pickle.load(f, encoding='latin1')
         id_field = 'indexes' if 'indexes' in proposals else 'ids'  # compat fix
         _sort_proposals(proposals, id_field)
         box_list = []

@@ -46,6 +46,7 @@ def combined_roidb_for_training(dataset_names, proposal_files):
             proposal_file=proposal_file,
             crowd_filter_thresh=cfg.TRAIN.CROWD_FILTER_THRESH
         )
+        roidb[0].update({k:v for k,v in ds.COCO.dataset.items() if k not in ['images', 'annotations', 'categories']})
         if cfg.TRAIN.USE_FLIPPED:
             logger.info('Appending horizontally-flipped training examples...')
             extend_with_flipped_entries(roidb, ds)

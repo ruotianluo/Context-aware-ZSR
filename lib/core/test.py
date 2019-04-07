@@ -47,7 +47,7 @@ import utils.image as image_utils
 import utils.keypoints as keypoint_utils
 
 
-def im_detect_all(model, im, box_proposals=None, timers=None):
+def im_detect_all(model, im, roidb=None, box_proposals=None, timers=None):
     """Process the outputs of model for testing
     Args:
       model: the network module
@@ -68,7 +68,7 @@ def im_detect_all(model, im, box_proposals=None, timers=None):
             model, im, box_proposals)
     else:
         scores, boxes, im_scale, blob_conv = im_detect_bbox(
-            model, im, cfg.TEST.SCALE, cfg.TEST.MAX_SIZE, box_proposals)
+            model, im, cfg.TEST.SCALE, cfg.TEST.MAX_SIZE, roidb, box_proposals)
     timers['im_detect_bbox'].toc()
 
     # score and boxes are from the whole image after score thresholding and nms
@@ -76,6 +76,7 @@ def im_detect_all(model, im, box_proposals=None, timers=None):
     # cls_boxes boxes and scores are separated by class and in the format used
     # for evaluating results
     timers['misc_bbox'].tic()
+    _scores = scores
     scores, boxes, cls_boxes = box_results_with_nms_and_limit(scores, boxes)
     timers['misc_bbox'].toc()
 
@@ -107,7 +108,10 @@ def im_detect_all(model, im, box_proposals=None, timers=None):
     else:
         cls_keyps = None
 
-    return cls_boxes, cls_segms, cls_keyps
+    if cfg.TEST.TAGGING:
+        return cls_boxes, cls_segms, cls_keyps, _scores
+    else:
+        return cls_boxes, cls_segms, cls_keyps
 
 
 def im_conv_body_only(model, im, target_scale, target_max_size):
@@ -124,7 +128,7 @@ def im_conv_body_only(model, im, target_scale, target_max_size):
     return blob_conv, im_scale
 
 
-def im_detect_bbox(model, im, target_scale, target_max_size, boxes=None):
+def im_detect_bbox(model, im, target_scale, target_max_size, roidb=None, boxes=None):
     """Prepare the bbox for testing"""
 
     inputs, im_scale = _get_blobs(im, boxes, target_scale, target_max_size)
@@ -135,7 +139,7 @@ def im_detect_bbox(model, im, target_scale, target_max_size, boxes=None):
         _, index, inv_index = np.unique(
             hashes, return_index=True, return_inverse=True
         )
-        inputs['rois'] = inputs['rois'][index, :]
+        inputs['rois'] = [inputs['rois'][index, :]]
         boxes = boxes[index, :]
 
     # Add multi-level rois for FPN
@@ -149,9 +153,17 @@ def im_detect_bbox(model, im, target_scale, target_max_size, boxes=None):
         inputs['data'] = [torch.from_numpy(inputs['data'])]
         inputs['im_info'] = [torch.from_numpy(inputs['im_info'])]
 
+    # The model will fail when no proposal is given, so we add a pseudo roi and remove it after the forward
+    zero_rois = 'rois' in inputs and inputs['rois'][0].shape[0] == 0 and not cfg.TEST.TAGGING
+    if zero_rois:
+        inputs['rois'] = [np.zeros((1, 5), dtype=np.float32)]
+
+    if roidb is not None and cfg.TEST.TAGGING: # If TAGGING mode, we feed ground truth roidb and get recall score
+        inputs['roidb'] = [[roidb]]
+
     return_dict = model(**inputs)
 
-    if cfg.MODEL.FASTER_RCNN:
+    if cfg.MODEL.FASTER_RCNN or cfg.TEST.TAGGING:
         rois = return_dict['rois'].data.cpu().numpy()
         # unscale back to raw image space
         boxes = rois[:, 1:5] / im_scale
@@ -160,6 +172,9 @@ def im_detect_bbox(model, im, target_scale, target_max_size, boxes=None):
     scores = return_dict['cls_score'].data.cpu().numpy().squeeze()
     # In case there is 1 proposal
     scores = scores.reshape([-1, scores.shape[-1]])
+
+    if zero_rois or return_dict['rois'].sum() == 0:
+        scores = scores[:-1, :]
 
     if cfg.TEST.BBOX_REG:
         # Apply bounding-box regression deltas
@@ -181,7 +196,7 @@ def im_detect_bbox(model, im, target_scale, target_max_size, boxes=None):
         # Simply repeat the boxes, once for each class
         pred_boxes = np.tile(boxes, (1, scores.shape[1]))
 
-    if cfg.DEDUP_BOXES > 0 and not cfg.MODEL.FASTER_RCNN:
+    if cfg.DEDUP_BOXES > 0 and not cfg.MODEL.FASTER_RCNN and not cfg.TEST.TAGGING:
         # Map scores and predictions back to the original set of boxes
         scores = scores[inv_index, :]
         pred_boxes = pred_boxes[inv_index, :]
@@ -752,7 +767,9 @@ def box_results_with_nms_and_limit(scores, boxes):  # NOTE: support single-batch
         scores_j = scores[inds, j]
         boxes_j = boxes[inds, j * 4:(j + 1) * 4]
         dets_j = np.hstack((boxes_j, scores_j[:, np.newaxis])).astype(np.float32, copy=False)
-        if cfg.TEST.SOFT_NMS.ENABLED:
+        if cfg.TEST.USE_GT_PROPOSALS:
+            nms_dets = dets_j
+        elif cfg.TEST.SOFT_NMS.ENABLED:
             nms_dets, _ = box_utils.soft_nms(
                 dets_j,
                 sigma=cfg.TEST.SOFT_NMS.SIGMA,

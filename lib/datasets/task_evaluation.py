@@ -85,6 +85,12 @@ def evaluate_boxes(dataset, all_boxes, output_dir, use_matlab=False):
             dataset, all_boxes, output_dir, use_salt=not_comp, cleanup=not_comp
         )
         box_results = _coco_eval_to_box_results(coco_eval)
+    elif _use_vg_evaluator(dataset):
+        logger.warn('Visual Genome bbox evaluated using COCO metrics/conversions')
+        coco_eval = json_dataset_evaluator.evaluate_boxes(
+            dataset, all_boxes, output_dir, use_salt=not_comp, cleanup=not_comp
+        )
+        box_results = _coco_eval_to_box_results(coco_eval)
     elif _use_voc_evaluator(dataset):
         # For VOC, always use salt and always cleanup because results are
         # written to the shared VOCdevkit results directory
@@ -244,13 +250,16 @@ def check_expected_results(results, atol=0.005, rtol=0.1):
 
 def _use_json_dataset_evaluator(dataset):
     """Check if the dataset uses the general json dataset evaluator."""
-    return dataset.name.find('coco_') > -1 or cfg.TEST.FORCE_JSON_DATASET_EVAL
+    return dataset.name.startswith('coco') or cfg.TEST.FORCE_JSON_DATASET_EVAL
 
 
 def _use_cityscapes_evaluator(dataset):
     """Check if the dataset uses the Cityscapes dataset evaluator."""
     return dataset.name.find('cityscapes_') > -1
 
+def _use_vg_evaluator(dataset):
+    """Check if the dataset uses the Cityscapes dataset evaluator."""
+    return dataset.name.startswith('vg')
 
 def _use_voc_evaluator(dataset):
     """Check if the dataset uses the PASCAL VOC dataset evaluator."""

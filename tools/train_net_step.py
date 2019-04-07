@@ -10,6 +10,7 @@ import logging
 from collections import defaultdict
 
 import numpy as np
+np.random.seed(123)
 import yaml
 import torch
 from torch.autograd import Variable
@@ -94,7 +95,17 @@ def parse_args():
         help='Starting step count for training epoch. 0-indexed.',
         default=0, type=int)
 
+    # Model saving and loading
+    parser.add_argument(
+        '--id', type=str, default="",
+        help='The id you want to use to save the model or autoresume')
+
     # Resume training: requires same iterations per epoch
+    parser.add_argument(
+        '--auto_resume',
+        help='auto resume to training on a checkpoint',
+        action='store_true')
+
     parser.add_argument(
         '--resume',
         help='resume to training on a checkpoint',
@@ -115,7 +126,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def save_ckpt(output_dir, args, step, train_size, model, optimizer):
+def save_ckpt(output_dir, args, step, train_size, model, optimizer, dataiterator=None, final=False):
     """Save checkpoint"""
     if args.no_save:
         return
@@ -126,13 +137,27 @@ def save_ckpt(output_dir, args, step, train_size, model, optimizer):
     if isinstance(model, mynn.DataParallel):
         model = model.module
     model_state_dict = model.state_dict()
+    if dataiterator:
+        if dataiterator.num_workers > 0:
+            sampler_state_dict = dataiterator.batch_sampler.sampler.state_dict(
+                (dataiterator.send_idx-dataiterator.rcvd_idx)*args.batch_size)
+        else:
+            sampler_state_dict = dataiterator.batch_sampler.sampler.state_dict(0)
+    else:
+        sampler_state_dict = None
     torch.save({
         'step': step,
         'train_size': train_size,
         'batch_size': args.batch_size,
         'model': model.state_dict(),
-        'optimizer': optimizer.state_dict()}, save_name)
+        'optimizer': optimizer.state_dict(),
+        'sampler': sampler_state_dict}, save_name)
+    if final:
+        save_name = os.path.join(ckpt_dir, 'model_final.pth')
+        torch.save({'model': model.state_dict()}, save_name)
     logger.info('save model: %s', save_name)
+    if final:
+        os._exit(0)
 
 
 def main():
@@ -156,6 +181,14 @@ def main():
     elif args.dataset == "keypoints_coco2017":
         cfg.TRAIN.DATASETS = ('keypoints_coco_2017_train',)
         cfg.MODEL.NUM_CLASSES = 2
+    elif args.dataset == "pascal_voc":
+        cfg.TRAIN.DATASETS = ('voc_2007_train', 'voc_2007_val',)
+        cfg.MODEL.NUM_CLASSES = 21
+    elif args.dataset == "pascal_voc_0712":
+        cfg.TRAIN.DATASETS = ('voc_2007_train', 'voc_2007_val', 'voc_2012_train', 'voc_2012_val')
+        cfg.MODEL.NUM_CLASSES = 21
+    elif args.dataset.startswith("vg"):
+        cfg.TRAIN.DATASETS = ('%s_train' %args.dataset,)
     else:
         raise ValueError("Unexpected args.dataset: {}".format(args.dataset))
 
@@ -224,6 +257,17 @@ def main():
 
     timers = defaultdict(Timer)
 
+    ### Overwrite resume and load_ckpt from auto_resume
+    if args.auto_resume:
+        # Note:
+        # It's possible to have both auto_resume and load_ckpt
+        # Auto_resume has priority, however if there is no model for auto resume
+        # the load_ckpt will be used, and args.resume flag will be False
+        misc_utils.infer_load_ckpt(args)
+        if args.resume and 'model_final.pth' in args.load_ckpt:
+            logging.info("model_final.pth exists; no need to train!")
+            return
+
     ### Dataset ###
     timers['roidb'].tic()
     roidb, ratio_list, ratio_index = combined_roidb_for_training(
@@ -250,11 +294,32 @@ def main():
         batch_sampler=batchSampler,
         num_workers=cfg.DATA_LOADER.NUM_THREADS,
         collate_fn=collate_minibatch)
-    dataiterator = iter(dataloader)
 
     ### Model ###
     maskRCNN = Generalized_RCNN()
+    if 'word_embeddings' in dataset._extra_info:
+        maskRCNN.Box_Outs.set_word_embedding(dataset._extra_info['word_embeddings'])
+    if cfg.MODEL.IGNORE_CLASSES:
+        if cfg.MODEL.IGNORE_CLASSES == 'all':
+            dataset._extra_info['all'] = dataset._extra_info['source'] + dataset._extra_info['target']
+        maskRCNN._ignore_classes = dataset._extra_info[cfg.MODEL.IGNORE_CLASSES]
+        maskRCNN.Box_Outs._ignore_classes = dataset._extra_info[cfg.MODEL.IGNORE_CLASSES]
+    if cfg.MODEL.NUM_RELATIONS > 0:
+        maskRCNN.Rel_Outs.relationship_dict = dataset._extra_info['relationships']
 
+    if cfg.MODEL.NUM_RELATIONS > 0 and cfg.TRAIN.FIX_BACKBONE:
+        for key, value in maskRCNN.named_parameters():
+            if 'Rel_Outs' not in key:
+                value.requires_grad = False
+
+    if cfg.TRAIN.FIX_CLASSIFIER:
+        for param in maskRCNN.Box_Outs.cls_score.parameters():
+            param.requires_grad = False
+
+    if cfg.FAST_RCNN.LOSS_TYPE == 'max_margin' and cfg.TRAIN.FIX_BACKBONE:
+        for key, value in maskRCNN.named_parameters():
+            if 'cls_score.mlp' not in key:
+                value.requires_grad = False
     if cfg.CUDA:
         maskRCNN.cuda()
 
@@ -271,6 +336,8 @@ def main():
     nonbias_params = []
     nonbias_param_names = []
     nograd_param_names = []
+    proj_params = []
+    proj_param_names = []
     for key, value in maskRCNN.named_parameters():
         if value.requires_grad:
             if 'bias' in key:
@@ -280,8 +347,12 @@ def main():
                 gn_params.append(value)
                 gn_param_names.append(key)
             else:
-                nonbias_params.append(value)
-                nonbias_param_names.append(key)
+                if cfg.FAST_RCNN.PROJ_LR_SCALE != 1 and 'cls_score.mlp' in key:
+                    proj_params.append(value)
+                    proj_param_names.append(key)
+                else:
+                    nonbias_params.append(value)
+                    nonbias_param_names.append(key)
         else:
             nograd_param_names.append(key)
     assert (gn_param_nameset - set(nograd_param_names) - set(bias_param_names)) == set(gn_param_names)
@@ -293,13 +364,18 @@ def main():
          'weight_decay': cfg.SOLVER.WEIGHT_DECAY},
         {'params': bias_params,
          'lr': 0 * (cfg.SOLVER.BIAS_DOUBLE_LR + 1),
+         'lr_scale': 'lambda x: x * (cfg.SOLVER.BIAS_DOUBLE_LR + 1)',
          'weight_decay': cfg.SOLVER.WEIGHT_DECAY if cfg.SOLVER.BIAS_WEIGHT_DECAY else 0},
         {'params': gn_params,
          'lr': 0,
-         'weight_decay': cfg.SOLVER.WEIGHT_DECAY_GN}
+         'weight_decay': cfg.SOLVER.WEIGHT_DECAY_GN},
+        {'params': proj_params,
+         'lr': 0,
+         'lr_scale': 'lambda x: x * cfg.FAST_RCNN.PROJ_LR_SCALE',
+         'weight_decay': cfg.SOLVER.WEIGHT_DECAY}
     ]
     # names of paramerters for each paramter
-    param_names = [nonbias_param_names, bias_param_names, gn_param_names]
+    param_names = [nonbias_param_names, bias_param_names, gn_param_names, proj_param_names]
 
     if cfg.SOLVER.TYPE == "SGD":
         optimizer = torch.optim.SGD(params, momentum=cfg.SOLVER.MOMENTUM)
@@ -324,8 +400,10 @@ def main():
 
             # There is a bug in optimizer.load_state_dict on Pytorch 0.3.1.
             # However it's fixed on master.
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            # misc_utils.load_optimizer_state_dict(optimizer, checkpoint['optimizer'])
+            # optimizer.load_state_dict(checkpoint['optimizer'])
+            misc_utils.load_optimizer_state_dict(optimizer, checkpoint['optimizer'])
+
+            batchSampler.sampler.load_state_dict(checkpoint.get('sampler', None))
         del checkpoint
         torch.cuda.empty_cache()
 
@@ -339,7 +417,7 @@ def main():
                                  minibatch=True)
 
     ### Training Setups ###
-    args.run_name = misc_utils.get_run_name() + '_step'
+    args.run_name = misc_utils.get_run_name(args) + '_step'
     output_dir = misc_utils.get_output_dir(args, args.run_name)
     args.cfg_filename = os.path.basename(args.cfg_file)
 
@@ -359,7 +437,9 @@ def main():
     ### Training Loop ###
     maskRCNN.train()
 
-    CHECKPOINT_PERIOD = int(cfg.TRAIN.SNAPSHOT_ITERS / cfg.NUM_GPUS)
+    dataiterator = iter(dataloader)
+
+    CHECKPOINT_PERIOD = int(cfg.TRAIN.SNAPSHOT_ITERS / effective_batch_size)
 
     # Set index for decay steps
     decay_steps_ind = None
@@ -431,16 +511,17 @@ def main():
             training_stats.LogIterStats(step, lr)
 
             if (step+1) % CHECKPOINT_PERIOD == 0:
-                save_ckpt(output_dir, args, step, train_size, maskRCNN, optimizer)
+                save_ckpt(output_dir, args, step, train_size, maskRCNN, optimizer, dataiterator)
 
         # ---- Training ends ----
         # Save last checkpoint
-        save_ckpt(output_dir, args, step, train_size, maskRCNN, optimizer)
+        save_ckpt(output_dir, args, step, train_size, maskRCNN, optimizer, final=True)
+        print('Checkpoint saved.')
 
     except (RuntimeError, KeyboardInterrupt):
-        del dataiterator
         logger.info('Save ckpt on exception ...')
-        save_ckpt(output_dir, args, step, train_size, maskRCNN, optimizer)
+        save_ckpt(output_dir, args, step, train_size, maskRCNN, optimizer, dataiterator)
+        del dataiterator
         logger.info('Save ckpt done.')
         stack_trace = traceback.format_exc()
         print(stack_trace)

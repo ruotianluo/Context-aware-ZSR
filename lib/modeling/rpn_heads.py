@@ -1,6 +1,8 @@
+import torch
 from torch import nn
 from torch.nn import init
 import torch.nn.functional as F
+import numpy as np
 
 from core.config import cfg
 from modeling.generate_anchors import generate_anchors
@@ -107,7 +109,7 @@ class single_scale_rpn_outputs(nn.Module):
                     rpn_cls_logits.view(B, 2, C // 2, H, W), dim=1)
                 rpn_cls_prob = rpn_cls_prob[:, 1].squeeze(dim=1)
             else:
-                rpn_cls_prob = F.sigmoid(rpn_cls_logits)
+                rpn_cls_prob = torch.sigmoid(rpn_cls_logits)
 
             rpn_rois, rpn_rois_prob = self.RPN_GenerateProposals(
                 rpn_cls_prob, rpn_bbox_pred, im_info)
@@ -126,6 +128,37 @@ class single_scale_rpn_outputs(nn.Module):
 
         return return_dict
 
+class single_scale_gt_outputs(nn.Module):
+    """Add RPN outputs to a single scale model (i.e., no FPN)."""
+    def __init__(self, dim_in, spatial_scale):
+        super().__init__()
+        self.dim_in = dim_in
+        self.dim_out = dim_in if cfg.RPN.OUT_DIM_AS_IN_DIM else cfg.RPN.OUT_DIM
+        self.RPN_GenerateProposalLabels = GenerateProposalLabelsOp()
+
+    def forward(self, x, im_info, roidb=None):
+        """
+        x: feature maps from the backbone network. (Variable)
+        im_info: (CPU Variable)
+        roidb: (list of ndarray)
+        """
+        return_dict = {}
+        rpn_rois = x.new_full((1, 5), -1, device='cpu').numpy()
+        
+        # Add op that generates training labels for in-network RPN proposals
+        if roidb is not None:
+            blobs_out = self.RPN_GenerateProposalLabels(rpn_rois, roidb, im_info)
+            return_dict.update(blobs_out)
+            if not self.training: # this will be triggered when RPN evaluation
+                return_dict['rpn_rois'] = return_dict['rois']
+                return_dict['rpn_roi_probs'] = np.ones((return_dict['rois'].shape[0], 1), dtype=np.float32)
+                if return_dict['rois'].shape[0] == 0:
+                    return_dict['rois'] = return_dict['rpn_rois'] = np.zeros((1,) + return_dict['rpn_rois'].shape[1:], dtype=np.float32)
+                    return_dict['rpn_roi_probs'] = np.zeros((1,1))
+                return_dict['rpn_rois'] = x.new_tensor(return_dict['rpn_rois'])
+                return_dict['rpn_roi_probs'] = x.new_tensor(return_dict['rpn_roi_probs'])
+
+        return return_dict
 
 def single_scale_rpn_losses(
         rpn_cls_logits, rpn_bbox_pred,
@@ -150,7 +183,7 @@ def single_scale_rpn_losses(
     else:
         weight = (rpn_labels_int32 >= 0).float()
         loss_rpn_cls = F.binary_cross_entropy_with_logits(
-            rpn_cls_logits, rpn_labels_int32.float(), weight, size_average=False)
+            rpn_cls_logits, rpn_labels_int32.float(), weight, reduction='sum')
         loss_rpn_cls /= weight.sum()
 
     loss_rpn_bbox = net_utils.smooth_l1_loss(

@@ -83,7 +83,7 @@ class TrainingStats(object):
             assert loss.shape[0] == cfg.NUM_GPUS
             loss = loss.mean(dim=0, keepdim=True)
             total_loss += loss
-            loss_data = loss.data[0]
+            loss_data = loss.item()
             model_out['losses'][k] = loss
             if cfg.FPN.FPN_ON:
                 if k.startswith('loss_rpn_cls_'):
@@ -93,14 +93,14 @@ class TrainingStats(object):
             self.smoothed_losses[k].AddValue(loss_data)
 
         model_out['total_loss'] = total_loss  # Add the total loss for back propagation
-        self.smoothed_total_loss.AddValue(total_loss.data[0])
+        self.smoothed_total_loss.AddValue(total_loss.item())
         if cfg.FPN.FPN_ON:
             self.smoothed_losses['loss_rpn_cls'].AddValue(loss_rpn_cls_data)
             self.smoothed_losses['loss_rpn_bbox'].AddValue(loss_rpn_bbox_data)
 
         for k, metric in model_out['metrics'].items():
             metric = metric.mean(dim=0, keepdim=True)
-            self.smoothed_metrics[k].AddValue(metric.data[0])
+            self.smoothed_metrics[k].AddValue(metric.item())
 
     def _UpdateIterStats_inner(self, model_out, inner_iter):
         """Update tracked iteration statistics for the case of iter_size > 1"""
@@ -125,7 +125,7 @@ class TrainingStats(object):
             assert loss.shape[0] == cfg.NUM_GPUS
             loss = loss.mean(dim=0, keepdim=True)
             total_loss += loss
-            loss_data = loss.data[0]
+            loss_data = loss.item()
 
             model_out['losses'][k] = loss
             if cfg.FPN.FPN_ON:
@@ -140,7 +140,7 @@ class TrainingStats(object):
                 self.smoothed_losses[k].AddValue(loss_data)
 
         model_out['total_loss'] = total_loss  # Add the total loss for back propagation
-        total_loss_data = total_loss.data[0]
+        total_loss_data = total_loss.item()
         self.inner_total_loss.append(total_loss_data)
         if cfg.FPN.FPN_ON:
             self.inner_loss_rpn_cls.append(loss_rpn_cls_data)
@@ -156,7 +156,7 @@ class TrainingStats(object):
 
         for k, metric in model_out['metrics'].items():
             metric = metric.mean(dim=0, keepdim=True)
-            metric_data = metric.data[0]
+            metric_data = metric.item()
             self.inner_metrics[k].append(metric_data)
             if inner_iter == (self.misc_args.iter_size - 1):
                 metric_data = self._mean_and_reset_inner_list('inner_metrics', k)

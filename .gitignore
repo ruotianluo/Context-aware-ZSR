@@ -9,6 +9,8 @@ data/*
 notebooks/*.pkl
 
 /Outputs
+lib/build
+lib/detectron_pytorch.egg-info
 
 # ------------------------------
 

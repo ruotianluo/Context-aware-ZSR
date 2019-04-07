@@ -1,0 +1,32 @@
+MODEL:
+  TYPE: generalized_rcnn
+  CONV_BODY: ResNet.ResNet50_conv4_body
+  FASTER_RCNN: True
+  TAGGING: True
+NUM_GPUS: 8
+RESNETS:
+  IMAGENET_PRETRAINED_WEIGHTS: 'data/pretrained_model/resnet50_caffe.pth'
+SOLVER:
+  WEIGHT_DECAY: 0.0001
+  LR_POLICY: steps_with_decay
+  BASE_LR: 0.005 # changed
+  GAMMA: 0.1
+  # 1x schedule (note TRAIN.IMS_PER_BATCH: 1)
+  MAX_ITER: 60000
+  STEPS: [0, 20000, 40000] # Not exactly the same. But should be similar.
+RPN:
+  SIZES: (128, 256, 512) # no usage
+FAST_RCNN:
+  ROI_BOX_HEAD: ResNet.ResNet_roi_conv5_head
+  ROI_XFORM_METHOD: RoIAlign
+# Below are no usage 
+TRAIN:
+  IMS_PER_BATCH: 1
+  RPN_BATCH_SIZE_PER_IM: 256
+  BATCH_SIZE_PER_IM: 128
+  RPN_MIN_SIZE: 16
+  FG_FRACTION: 1
+TEST:
+  RPN_PRE_NMS_TOP_N: 6000
+  RPN_POST_NMS_TOP_N: 300
+  RPN_MIN_SIZE: 16
