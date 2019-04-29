@@ -1,5 +1,5 @@
 # Introduction
-This repository includes the code for paper Context-aware zero-shot recognition.
+This repository includes the code for paper [Context-aware zero-shot recognition](https://arxiv.org/abs/1904.09320).
 
 The code is highly based on [Detectron.pytorch](https://github.com/roytseng-tw/Detectron.pytorch). Thanks for the effort from original author.
 
